@@ -107,15 +107,13 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["TicketPrefix"] = df["Ticket"].apply(ticket_prefix)
     df["CabinDeck"] = df["Cabin"].apply(cabin_deck)
 
-    # Binning za Age (robustnije za nedostajuće vrednosti)
-    # Napomena: pravu imputaciju Age radimo u pipeline-u,
-    # a ovde definišemo i diskretizovan atribut radi potencijalne informativnosti
+    # podela po godinama (robustnije za nedostajuće vrednosti)
     age_bins = [0, 12, 18, 25, 35, 50, 65, 120]
     df["AgeBin"] = pd.cut(df["Age"], bins=age_bins,
                           labels=["child", "teen", "yadult", "adult", "mature", "senior", "elder"], include_lowest=True)
 
     # Cena karte po log-skali (stabilizuje raspodelu)
-    df["FareLog"] = np.log1p(df["Fare"].fillna(0))
+    # df["FareLog"] = np.log1p(df["Fare"].fillna(0))
 
     return df
 
@@ -133,7 +131,7 @@ def basic_eda_plots(df: pd.DataFrame, save: bool = True) -> None:
     # 2) Preživljavanje po polu
     plt.figure()
     df["Sex_label"] = df["Sex"].map({"female": "zena", "male": "muskaraca"})
-    df["Survived_label"] = df["Survived"].map({0: "Nije preživelo", 1: "Preživelo"})
+    df["Survived_label"] = df["Survived"].map({0: "Nisu preživeli", 1: "Preživeli"})
     pd.crosstab(df["Sex_label"], df["Survived_label"]).plot(kind="bar", stacked=True)
     plt.title("Preživljavanje po polu (Sex)")
     plt.xlabel("Pol")
@@ -144,7 +142,7 @@ def basic_eda_plots(df: pd.DataFrame, save: bool = True) -> None:
 
     # 3) Preživljavanje po klasi
     plt.figure()
-    df["Survived_label"] = df["Survived"].map({0: "Nije preživelo", 1: "Preživelo"})
+    df["Survived_label"] = df["Survived"].map({0: "Nisu preživeli", 1: "Preživeli"})
     pd.crosstab(df["Pclass"], df["Survived_label"]).plot(kind="bar", stacked=True)
     plt.title("Preživljavanje po klasi (Pclass)")
     plt.xlabel("Klasa")
@@ -155,7 +153,7 @@ def basic_eda_plots(df: pd.DataFrame, save: bool = True) -> None:
 
     # 4) Preživljavanje po luci ukrcavanja
     plt.figure()
-    df["Survived_label"] = df["Survived"].map({0: "Nije preživelo", 1: "Preživelo"})
+    df["Survived_label"] = df["Survived"].map({0: "Nisu preživeli", 1: "Preživeli"})
     pd.crosstab(df["Embarked"], df["Survived_label"]).plot(kind="bar", stacked=True)
     plt.title("Preživljavanje po luci (Embarked)")
     plt.xlabel("Luka ukrcavanja")
@@ -221,8 +219,10 @@ def evaluate_models(X: pd.DataFrame, y: pd.Series, preprocessor: ColumnTransform
         pipe = Pipeline(steps=[("pre", preprocessor), ("clf", clf)])
         cv = cross_validate(pipe, X, y, cv=skf, scoring=scoring, return_estimator=True)
         metrics = {m: float(np.mean(cv[f"test_{m}"])) for m in scoring.keys()}
+
         # Fit final pipeline on full data for feature names
         pipe.fit(X, y)
+
         # Dohvati imena kolona posle transformacije
         ohe = pipe.named_steps["pre"].named_transformers_["cat"].named_steps["onehot"]
         cat_feature_names = list(ohe.get_feature_names_out())
@@ -276,16 +276,21 @@ def plot_feature_importance(model_res: ModelResult, X: pd.DataFrame, y: pd.Serie
     # Radimo na train split-u (bez posebnog valida jer radimo CV već iznad)
     X_train, X_val, y_train, y_val = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
     pipe.fit(X_train, y_train)
+
     perm = permutation_importance(pipe, X_val, y_val, n_repeats=15, random_state=42, scoring="f1")
 
-    # Uzimamo stvarne kolone iz pipeline-a
-    try:
-        feature_names = pipe[:-1].get_feature_names_out()
-    except AttributeError:
-        feature_names = X.columns
+    # Uzimamo stvarna imena feature-a iz X
+    feature_names = X.columns
 
-    perm_df = pd.DataFrame({"feature": feature_names, "importance": perm.importances_mean})
-    perm_df = perm_df.sort_values("importance", ascending=False).head(top_k)
+
+    # Pravimo DataFrame koji je uvek iste dužine
+    perm_df = pd.DataFrame({
+        "feature": feature_names,
+        "importance": perm.importances_mean
+    })
+
+    # Sortiranje i uzimanje top_k
+    perm_df = perm_df.sort_values(by="importance", ascending=False).head(top_k)
 
     plt.figure()
     plt.barh(perm_df["feature"][::-1], perm_df["importance"][::-1])
@@ -326,26 +331,32 @@ def train_with_selected_features(model_name: str, base_pre: ColumnTransformer, X
     # ili, pošto već imamo listu imena nakon transformacije, uradićemo mapiranje maskom.
     # Implementiraćemo custom step koji filtrira kolone po imenu.
 
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
     from sklearn.base import BaseEstimator, TransformerMixin
 
     class ColumnSelectorByName(BaseEstimator, TransformerMixin):
-        def __init__(self, names: List[str]):
-            self.names = names
-            self._all: List[str] = []
-            self.idx_: np.ndarray | None = None
+        """
+        Custom transformer koji bira kolone po imenu iz DataFrame-a.
+        Radi u sklearn pipeline-u.
+        """
+
+        def __init__(self, columns):
+            self.columns = columns  # lista imena kolona
 
         def fit(self, X, y=None):
-            if hasattr(X, "columns"):
-                self._all = list(X.columns)
+            # pronalazimo indekse kolona u DataFrame-u i čuvamo ih
+            if isinstance(X, pd.DataFrame):
+                self._indices = [X.columns.get_loc(col) for col in self.columns]
+            else:
+                raise ValueError("ColumnSelectorByName očekuje pd.DataFrame kao ulaz")
             return self
 
         def transform(self, X):
-            # X je numpy nakon preprocesiranja; imena dolaze iz preprocesora
-            return X[:, self._indices]
+            # koristimo zapamćene indekse da izdvojimo kolone
+            if not hasattr(self, "_indices"):
+                raise AttributeError("Morate prvo pozvati fit pre transform")
+            return X.iloc[:, self._indices].copy()
 
-        def set_feature_names(self, all_names: List[str]):
-            self._all = all_names
-            self._indices = np.array([self._all.index(n) for n in self.names if n in self._all])
 
     # Napravi kopiju preprocesora da dobijemo imena posle fit-a
     pre = base_pre
@@ -353,16 +364,29 @@ def train_with_selected_features(model_name: str, base_pre: ColumnTransformer, X
     all_names = [fn.replace("num__", "").replace("cat__", "") for fn in pre.get_feature_names_out()]
 
     selector = ColumnSelectorByName(selected_features)
-    selector.set_feature_names(all_names)
+    #selector.set_feature_names(all_names)
+    # razdvojimo numeričke i kategorijske kolone
+    num_feats = [f for f in selected_features if X[f].dtype in [int, float]]
+    cat_feats = [f for f in selected_features if X[f].dtype == object]
 
-    # Model
-    clf = RandomForestClassifier(n_estimators=400, random_state=42)
+    # ColumnTransformer
+    preprocessor = ColumnTransformer(transformers=[
+        ("num", StandardScaler(), num_feats),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_feats)
+    ])
 
+    # klasifikator
+    if model_name == "RF":
+        clf = RandomForestClassifier(random_state=42)
+    else:
+        raise ValueError(f"Model {model_name} nije podrzan")
+
+    # kompletan pipeline
     pipe = Pipeline([
-        ("pre", pre),
-        ("sel", selector),
+        ("preproc", preprocessor),
         ("clf", clf)
     ])
+    #pipe.fit(X_train, y_train)
 
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     scoring = {"accuracy": "accuracy", "precision": "precision", "recall": "recall", "f1": "f1"}
@@ -471,7 +495,8 @@ def main():
     perm_df.to_csv(os.path.join(TABLE_DIR, f"top_permutation_importance_{best.name}.csv"), index=False)
 
     # 6) Selekcija najbitnijih atributa po MI i poređenje performansi
-    top_feats = select_top_features(preprocessor, X, y, k=20)
+    top_feats = ["Pclass", "Sex", "Age", "Fare", "SibSp", "Parch", "Embarked"]
+
     res_top = train_with_selected_features("RF", preprocessor, X, y, top_feats)
     results.append(res_top)
 
