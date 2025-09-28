@@ -257,6 +257,7 @@ def plot_feature_importance(model_res: ModelResult, X: pd.DataFrame, y: pd.Serie
     clf = pipe.named_steps["clf"]
 
     # 1. Nativna važnost atributa (feature_importances_ ili coef_)
+    # vec postoji u modelima
     importances = None
     if hasattr(clf, "feature_importances_"):
         # RandomForest, GradientBoosting – oni imaju .feature_importances_
@@ -287,6 +288,7 @@ def plot_feature_importance(model_res: ModelResult, X: pd.DataFrame, y: pd.Serie
         fi_df = pd.DataFrame()
 
     # Permutation importance (stabilnije tumačenje)
+    # proveravamo svaki feature koliko je bitan za model
     # Radimo na train split-u (sa test velicinom od 25%)
     X_train, X_val, y_train, y_val = train_test_split(X, y, stratify=y, test_size=0.25, random_state=42)
     # ponovo fitujemo na train podacima
@@ -318,7 +320,7 @@ def plot_feature_importance(model_res: ModelResult, X: pd.DataFrame, y: pd.Serie
 
     return perm_df
 
-
+# gledamo koji feature je najbitniji
 def select_top_features(preprocessor: ColumnTransformer, X: pd.DataFrame, y: pd.Series, k: int = 20) -> List[str]:
     # uzimamo imena kolona iz preprocessora
     preprocessor.fit(X)     # Fitujemo preprocesor da sazna sve transformacije
